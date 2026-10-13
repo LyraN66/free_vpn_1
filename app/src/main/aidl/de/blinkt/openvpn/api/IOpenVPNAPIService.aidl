@@ -6,6 +6,7 @@ import de.blinkt.openvpn.api.IOpenVPNStatusCallback;
 
 import android.content.Intent;
 import android.os.ParcelFileDescriptor;
+import android.os.Bundle;
 
 interface IOpenVPNAPIService {
 	List<APIVpnProfile> getProfiles();
