@@ -1,216 +1,266 @@
 package com.example.freevpn
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.net.VpnService
+import android.content.ServiceConnection
+import android.net.Uri
 import android.os.Bundle
+import android.os.IBinder
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.wireguard.android.backend.Backend
-import com.wireguard.android.backend.GoBackend
-import com.wireguard.android.backend.Tunnel
-import com.wireguard.config.Config
+import androidx.lifecycle.lifecycleScope
+import de.blinkt.openvpn.api.IOpenVPNAPIService
+import de.blinkt.openvpn.api.IOpenVPNStatusCallback
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.BufferedReader
-import java.io.StringReader
+
+private const val OPENVPN_PKG = "de.blinkt.openvpn"
 
 class MainActivity : ComponentActivity() {
 
-    private val backend: Backend by lazy { GoBackend(applicationContext) }
+    private var service: IOpenVPNAPIService? = null
+    private var bound = false
 
-    private val tunnel = object : Tunnel {
-        override fun getName() = "freevpn"
-        override fun onStateChange(newState: Tunnel.State) { onTunnelState(newState) }
+    // UI durumu
+    private val uiStatus = mutableStateOf("Hazır")
+    private val uiServer = mutableStateOf<String?>(null)
+    private val uiBusy = mutableStateOf(false)
+    private val uiConnected = mutableStateOf(false)
+    private val uiNeedInstall = mutableStateOf(false)
+
+    private lateinit var apiPermLauncher: ActivityResultLauncher<Intent>
+    private lateinit var vpnPermLauncher: ActivityResultLauncher<Intent>
+
+    private val statusCallback = object : IOpenVPNStatusCallback.Stub() {
+        override fun newStatus(uuid: String?, state: String?, message: String?, level: String?) {
+            runOnUiThread {
+                val s = state ?: ""
+                uiStatus.value = translate(s, message)
+                uiConnected.value = s == "CONNECTED"
+                if (s == "CONNECTED" || s == "NOPROCESS" || s == "DISCONNECTED") uiBusy.value = false
+            }
+        }
     }
 
-    // UI'ın dinleyebilmesi için durum
-    private var stateListener: ((Tunnel.State) -> Unit)? = null
-    private fun onTunnelState(s: Tunnel.State) { stateListener?.invoke(s) }
+    private val connection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            service = IOpenVPNAPIService.Stub.asInterface(binder)
+            bound = true
+            try {
+                service?.registerStatusCallback(statusCallback)
+            } catch (e: Exception) { /* yok say */ }
+            onBound()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            service = null
+            bound = false
+        }
+    }
+
+    private var pendingConnect = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        apiPermLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+            if (res.resultCode == RESULT_OK) afterApiPermission()
+            else fail("OpenVPN'e erişim izni verilmedi.")
+        }
+        vpnPermLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+            if (res.resultCode == RESULT_OK) afterVpnPermission()
+            else fail("VPN izni verilmedi.")
+        }
+
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface(Modifier.fillMaxSize()) { VpnScreen() }
+                Surface(Modifier.fillMaxSize()) { Screen() }
             }
         }
     }
 
-    /** Tüneli kurar/kaldırır. IO thread'inde çağrılır. */
-    private fun setState(up: Boolean, configText: String): Tunnel.State {
-        val config = if (up) Config.parse(BufferedReader(StringReader(configText))) else null
-        return backend.setState(tunnel, if (up) Tunnel.State.UP else Tunnel.State.DOWN, config)
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            if (bound) { service?.unregisterStatusCallback(statusCallback); unbindService(connection) }
+        } catch (e: Exception) { /* yok say */ }
     }
 
-    @OptIn(ExperimentalMaterial3Api::class)
+    // ---- Akış ----
+
+    private fun startConnect() {
+        if (!isOpenVpnInstalled()) { uiNeedInstall.value = true; return }
+        uiNeedInstall.value = false
+        uiBusy.value = true
+        uiServer.value = null
+        uiStatus.value = "OpenVPN'e bağlanılıyor…"
+        pendingConnect = true
+        if (service != null) onBound()
+        else {
+            val intent = Intent(IOpenVPNAPIService::class.java.name).setPackage(OPENVPN_PKG)
+            val ok = bindService(intent, connection, Context.BIND_AUTO_CREATE)
+            if (!ok) fail("OpenVPN servisine bağlanılamadı.")
+        }
+    }
+
+    private fun onBound() {
+        if (!pendingConnect) return
+        try {
+            val p = service?.prepare(packageName)
+            if (p != null) apiPermLauncher.launch(p) else afterApiPermission()
+        } catch (e: Exception) {
+            fail("İzin hatası: ${e.message}")
+        }
+    }
+
+    private fun afterApiPermission() {
+        try {
+            val p = service?.prepareVPNService()
+            if (p != null) vpnPermLauncher.launch(p) else afterVpnPermission()
+        } catch (e: Exception) {
+            fail("VPN izni hatası: ${e.message}")
+        }
+    }
+
+    private fun afterVpnPermission() {
+        lifecycleScope.launch {
+            uiStatus.value = "En hızlı sunucu aranıyor…"
+            val srv = withContext(Dispatchers.IO) { VpnGate.best() }
+            if (srv == null) { fail("Ücretsiz sunucu bulunamadı. İnternetinizi kontrol edip tekrar deneyin."); return@launch }
+            uiServer.value = buildString {
+                append(srv.country.ifBlank { srv.countryShort })
+                if (srv.speedMbps > 0) append(" • ~${srv.speedMbps} Mbps")
+                append(" • ping ${srv.ping} ms")
+            }
+            uiStatus.value = "Bağlanılıyor…"
+            pendingConnect = false
+            try {
+                withContext(Dispatchers.IO) { service?.startVPN(srv.ovpn) }
+            } catch (e: Exception) {
+                fail("Başlatılamadı: ${e.message}")
+            }
+        }
+    }
+
+    private fun disconnect() {
+        uiBusy.value = true
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) { service?.disconnect() }
+                uiConnected.value = false
+                uiStatus.value = "Bağlantı kesildi"
+            } catch (e: Exception) {
+                uiStatus.value = "Kesilemedi: ${e.message}"
+            } finally { uiBusy.value = false }
+        }
+    }
+
+    private fun fail(msg: String) {
+        pendingConnect = false
+        uiBusy.value = false
+        uiStatus.value = "❌ $msg"
+    }
+
+    private fun isOpenVpnInstalled(): Boolean = try {
+        packageManager.getPackageInfo(OPENVPN_PKG, 0); true
+    } catch (e: Exception) { false }
+
+    private fun openStore() {
+        val market = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$OPENVPN_PKG"))
+        val web = Intent(Intent.ACTION_VIEW, Uri.parse("https://f-droid.org/packages/$OPENVPN_PKG/"))
+        try { startActivity(market) } catch (e: Exception) { startActivity(web) }
+    }
+
+    private fun translate(state: String, message: String?): String = when (state) {
+        "CONNECTED" -> "🟢 Bağlı"
+        "DISCONNECTED", "NOPROCESS" -> "⚪ Bağlı değil"
+        "CONNECTING", "WAIT", "RECONNECTING" -> "🟡 Bağlanılıyor…"
+        "AUTH", "GET_CONFIG", "ASSIGN_IP", "ADD_ROUTES" -> "🟡 Kimlik/ayar…"
+        else -> if (message.isNullOrBlank()) state else "$state: $message"
+    }
+
+    // ---- Arayüz ----
+
     @Composable
-    private fun VpnScreen() {
-        val context = LocalContext.current
-        val scope = rememberCoroutineScope()
-        val prefs = remember { context.getSharedPreferences("vpn", Context.MODE_PRIVATE) }
-
-        var configText by remember { mutableStateOf(prefs.getString("config", "") ?: "") }
-        var state by remember { mutableStateOf(Tunnel.State.DOWN) }
-        var busy by remember { mutableStateOf(false) }
-        var message by remember { mutableStateOf<String?>(null) }
-
-        DisposableEffect(Unit) {
-            stateListener = { s -> state = s }
-            onDispose { stateListener = null }
-        }
-
-        // Bağlanmadan önce gereken VPN izni
-        val pending = remember { mutableStateOf(false) }
-        val permLauncher = rememberLauncherForActivityResult(
-            ActivityResultContracts.StartActivityForResult()
-        ) { result ->
-            if (result.resultCode == RESULT_OK && pending.value) {
-                pending.value = false
-                doConnect(scope, configText, onBusy = { busy = it }, onMsg = { message = it }, onState = { state = it })
-            } else {
-                pending.value = false
-                busy = false
-                message = "VPN izni verilmedi."
-            }
-        }
+    private fun Screen() {
+        val status by uiStatus
+        val server by uiServer
+        val busy by uiBusy
+        val connected by uiConnected
+        val needInstall by uiNeedInstall
 
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text("Free VPN", style = MaterialTheme.typography.headlineMedium)
+            Text(
+                "Tek dokunuşla en hızlı ücretsiz sunucuya bağlanır (VPN Gate).",
+                style = MaterialTheme.typography.bodySmall,
+                textAlign = TextAlign.Center,
+            )
 
-            val connected = state == Tunnel.State.UP
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = if (connected) Color(0xFF14532D) else MaterialTheme.colorScheme.surfaceVariant
                 ),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        when (state) {
-                            Tunnel.State.UP -> "🟢 Bağlı"
-                            Tunnel.State.DOWN -> "⚪ Bağlı değil"
-                            else -> "🟡 Geçiş..."
-                        },
-                        style = MaterialTheme.typography.titleLarge,
-                    )
-                    Text(
-                        if (connected) "Trafiğiniz VPN üzerinden geçiyor." else "Aşağıya bir WireGuard yapılandırması yapıştırın.",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                Column(Modifier.padding(20.dp).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(status, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
+                    server?.let {
+                        Spacer(Modifier.height(6.dp))
+                        Text(it, style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center)
+                    }
                 }
             }
 
-            OutlinedTextField(
-                value = configText,
-                onValueChange = {
-                    configText = it
-                    prefs.edit().putString("config", it).apply()
-                },
-                label = { Text("WireGuard yapılandırması (.conf)") },
-                placeholder = { Text("[Interface]\nPrivateKey = ...\nAddress = ...\nDNS = ...\n\n[Peer]\nPublicKey = ...\nEndpoint = host:port\nAllowedIPs = 0.0.0.0/0, ::/0") },
-                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
-                minLines = 8,
-                enabled = !busy && !connected,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            Button(
-                onClick = {
-                    message = null
-                    if (connected) {
-                        // Bağlantıyı kes
-                        busy = true
-                        scope.launch {
-                            try {
-                                withContext(Dispatchers.IO) { setState(false, "") }
-                                state = Tunnel.State.DOWN
-                            } catch (e: Exception) {
-                                message = "Kesilemedi: ${e.message}"
-                            } finally { busy = false }
-                        }
-                    } else {
-                        if (configText.isBlank()) { message = "Önce bir yapılandırma yapıştırın."; return@Button }
-                        // Yapılandırmayı doğrula
-                        try {
-                            Config.parse(BufferedReader(StringReader(configText)))
-                        } catch (e: Exception) {
-                            message = "Yapılandırma hatalı: ${e.message}"
-                            return@Button
-                        }
-                        busy = true
-                        val prepare: Intent? = VpnService.prepare(context)
-                        if (prepare != null) {
-                            pending.value = true
-                            permLauncher.launch(prepare)
-                        } else {
-                            doConnect(scope, configText, onBusy = { busy = it }, onMsg = { message = it }, onState = { state = it })
+            if (needInstall) {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("OpenVPN for Android gerekli", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Bağlantıyı ücretsiz, reklamsız ve açık kaynaklı OpenVPN for Android yapar. " +
+                                "Bir kez kurmanız yeterli, sonra bu uygulamadan bağlanırsınız.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Button(onClick = { openStore() }, modifier = Modifier.fillMaxWidth()) {
+                            Text("OpenVPN for Android'i kur")
                         }
                     }
-                },
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth().height(52.dp),
-            ) {
-                if (busy) CircularProgressIndicator(Modifier.height(20.dp), strokeWidth = 2.dp, color = Color.White)
-                else Text(if (connected) "Bağlantıyı kes" else "Bağlan")
+                }
             }
 
-            message?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+            Button(
+                onClick = { if (connected) disconnect() else startConnect() },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+            ) {
+                if (busy) CircularProgressIndicator(Modifier.height(22.dp), strokeWidth = 2.dp, color = Color.White)
+                else Text(if (connected) "Bağlantıyı kes" else "En hızlı sunucuya bağlan", style = MaterialTheme.typography.titleMedium)
             }
 
             HorizontalDivider()
-            Text("Ücretsiz sunucu yapılandırması nereden bulunur?", style = MaterialTheme.typography.titleSmall)
             Text(
-                "• VPN Gate (vpngate.net) WireGuard/OpenVPN yapılandırmaları paylaşır.\n" +
-                    "• Ücretsiz WireGuard config paylaşan siteler.\n\n" +
-                    "Uyarı: Tanımadığınız kişilerin işlettiği ücretsiz sunucular trafiğinizi görebilir. " +
-                    "Bankacılık gibi hassas işlerde kullanmayın.",
+                "Uyarı: VPN Gate sunucularını gönüllüler işletir ve trafiğinizi görebilirler. " +
+                    "Bankacılık gibi hassas işlemler için kullanmayın.",
                 style = MaterialTheme.typography.bodySmall,
+                textAlign = TextAlign.Center,
             )
         }
     }
-
-    // İki kez çağrı hatasını önlemek için tek giriş noktası
-    private fun doConnect(
-        scope: kotlinx.coroutines.CoroutineScope,
-        configText: String,
-        onBusy: (Boolean) -> Unit,
-        onMsg: (String?) -> Unit,
-        onState: (Tunnel.State) -> Unit,
-    ) {
-        onBusy(true)
-        scope.launch {
-            try {
-                val s = withContext(Dispatchers.IO) { setState(true, configText) }
-                onState(s)
-                onMsg(null)
-            } catch (e: Exception) {
-                onMsg("Bağlanılamadı: ${e.message}")
-                onState(Tunnel.State.DOWN)
-            } finally {
-                onBusy(false)
-            }
-        }
-    }
-
 }

@@ -30,13 +30,11 @@ android {
     }
     buildFeatures {
         compose = true
+        aidl = true
     }
 }
 
 dependencies {
-    // Resmi WireGuard Android tünel kütüphanesi (native wireguard-go dahil)
-    implementation("com.wireguard.android:tunnel:1.0.20230706")
-
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))

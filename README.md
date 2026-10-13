@@ -1,25 +1,22 @@
-# Free VPN (Android, WireGuard)
+# Free VPN (Android)
 
-Reklamsız, sade bir WireGuard VPN istemcisi. Bir WireGuard yapılandırması (`.conf`)
-yapıştırıp bağlanırsınız. Sunucuyu siz sağlarsınız (kendi sunucunuz ya da ücretsiz
-paylaşılan yapılandırmalar).
+Tek dokunuşla **en hızlı ücretsiz sunucuya** bağlanan, reklamsız bir VPN uygulaması.
+Sunucuları **VPN Gate** (Tsukuba Üniversitesi akademik projesi) listesinden otomatik bulur;
+bağlantının kendisini ücretsiz, açık kaynak **OpenVPN for Android** yapar.
 
-## Kullanım
-1. Uygulamayı açın.
-2. Elinizdeki WireGuard yapılandırmasını metin kutusuna yapıştırın.
-3. **Bağlan**'a basın; Android VPN izni ister, onaylayın.
+## Nasıl çalışır
+1. Uygulamayı açıp **"En hızlı sunucuya bağlan"**a basarsınız.
+2. OpenVPN for Android kurulu değilse, kurmanız için yönlendirir (bir kez).
+3. Uygulama VPN Gate'ten en hızlı sunucuyu seçer, izinleri ister ve bağlanır.
 4. Durum 🟢 Bağlı olunca trafiğiniz VPN üzerinden geçer. **Bağlantıyı kes** ile durur.
 
-## Ücretsiz yapılandırma nereden bulunur?
-- **VPN Gate** (vpngate.net) — akademik proje, WireGuard/OpenVPN yapılandırmaları.
-- Ücretsiz WireGuard config paylaşan siteler.
-
-> Uyarı: Tanımadığınız kişilerin işlettiği ücretsiz sunucular trafiğinizi görebilir.
-> Hassas işler (bankacılık vb.) için güvenilir, kendi sunucunuzu kullanın.
+> Uyarı: VPN Gate sunucularını gönüllüler işletir ve trafiğinizi görebilirler.
+> Bankacılık gibi hassas işlemler için kullanmayın.
 
 ## Teknoloji
 - Kotlin, Jetpack Compose
-- Resmi `com.wireguard.android:tunnel` kütüphanesi (native wireguard-go dahil)
+- VPN Gate açık API'si (`/api/iphone/`)
+- OpenVPN for Android dış API'si (AIDL ile `startVPN`)
 - Android 7.0+ (minSdk 24)
 
 ## APK
