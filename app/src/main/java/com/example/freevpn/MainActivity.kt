@@ -308,7 +308,10 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                             Column(horizontalAlignment = Alignment.End) {
-                                if (srv.speedMbps > 0) Text("~${srv.speedMbps} Mbps", style = MaterialTheme.typography.titleSmall)
+                                val sp = if (srv.speedMbps > 0) "~${srv.speedMbps} Mbps" else ""
+                                val pr = srv.proto.ifBlank { "" }
+                                Text(listOf(sp, pr).filter { it.isNotBlank() }.joinToString(" · "),
+                                    style = MaterialTheme.typography.titleSmall)
                                 Text("ping ${srv.ping} ms", style = MaterialTheme.typography.bodySmall)
                             }
                         }

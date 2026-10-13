@@ -13,8 +13,12 @@ data class VpnServer(
     val ping: String,
     val ovpn: String,
     val continent: String = "",
+    val proto: String = "",      // "UDP" / "TCP"
+    val score: Long = 0,         // VPN Gate kalite puanı
 ) {
     val speedMbps: Int get() = (speedBps / 1_000_000L).toInt()
+    val pingMs: Int get() = ping.toIntOrNull() ?: 9999
+    val isUdp: Boolean get() = proto == "UDP"
 }
 
 object VpnGate {
@@ -46,24 +50,49 @@ object VpnGate {
                     speedBps = speed,
                     ping = p[3].trim(),
                     ovpn = ovpn,
+                    proto = detectProto(ovpn),
+                    score = p[2].trim().toLongOrNull() ?: 0L,
                 )
             )
         }
-        return servers.sortedByDescending { it.speedBps }
+        return servers
     }
 
-    /** En hızlı sunucu. */
-    fun best(): VpnServer? = fetchServers().firstOrNull()
+    /** OpenVPN yapılandırmasından protokolü (UDP/TCP) okur. */
+    private fun detectProto(ovpn: String): String {
+        val m = Regex("(?im)^\\s*proto\\s+(udp|tcp)").find(ovpn) ?: return ""
+        return m.groupValues[1].uppercase()
+    }
 
-    /** Her kıta için en hızlı sunucu, hızdan yavaşa sıralı. */
+    /** Türkiye'den gezinme hızına göre bölge yakınlık sırası (küçük = yakın). */
+    private fun regionRank(continent: String): Int = when (continent) {
+        "Avrupa" -> 0
+        "Asya" -> 1
+        "Afrika" -> 2
+        "Kuzey Amerika" -> 3
+        "Güney Amerika" -> 4
+        "Okyanusya" -> 5
+        else -> 6
+    }
+
+    /** Bir sunucunun gezinme için kalitesi (büyük = iyi): UDP öncelikli, sonra puan. */
+    private fun quality(s: VpnServer): Long = (if (s.isUdp) 1_000_000_000L else 0L) + s.score
+
+    /**
+     * Her bölge (kıta) için en iyi sunucuyu seçer:
+     * UDP ve yüksek puan önceliğiyle; liste Türkiye'ye yakınlık sırasına göre döner.
+     */
     fun bestPerContinent(servers: List<VpnServer> = fetchServers()): List<VpnServer> {
         return servers
             .groupBy { continentOf(it.countryShort) }
             .mapNotNull { (continent, list) ->
-                list.maxByOrNull { it.speedBps }?.copy(continent = continent)
+                list.maxByOrNull { quality(it) }?.copy(continent = continent)
             }
-            .sortedByDescending { it.speedBps }
+            .sortedBy { regionRank(it.continent) }
     }
+
+    /** En iyi tek sunucu (en yakın bölgenin en iyisi). */
+    fun best(): VpnServer? = bestPerContinent().firstOrNull()
 
     /** ISO ülke kodundan kıta adı (Türkçe). */
     fun continentOf(cc: String): String = when (cc.uppercase()) {
