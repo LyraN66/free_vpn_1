@@ -41,6 +41,8 @@ class MainActivity : ComponentActivity() {
     private val uiBusy = mutableStateOf(false)
     private val uiConnected = mutableStateOf(false)
     private val uiNeedInstall = mutableStateOf(false)
+    private val uiChoices = mutableStateOf<List<VpnServer>>(emptyList())
+    private var pendingServer: VpnServer? = null
 
     private lateinit var apiPermLauncher: ActivityResultLauncher<Intent>
     private lateinit var vpnPermLauncher: ActivityResultLauncher<Intent>
@@ -48,10 +50,40 @@ class MainActivity : ComponentActivity() {
     private val statusCallback = object : IOpenVPNStatusCallback.Stub() {
         override fun newStatus(uuid: String?, state: String?, message: String?, level: String?) {
             runOnUiThread {
-                val s = state ?: ""
-                uiStatus.value = translate(s, message)
-                uiConnected.value = s == "CONNECTED"
-                if (s == "CONNECTED" || s == "NOPROCESS" || s == "DISCONNECTED") uiBusy.value = false
+                // Resmi arayüzün kullandığı gibi, durum için `level` değerine bakıyoruz.
+                when (level) {
+                    "LEVEL_CONNECTED" -> {
+                        uiStatus.value = "🟢 Bağlı"
+                        uiConnected.value = true
+                        uiBusy.value = false
+                    }
+                    "LEVEL_NOTCONNECTED" -> {
+                        uiStatus.value = "⚪ Bağlı değil"
+                        uiConnected.value = false
+                        uiBusy.value = false
+                    }
+                    "LEVEL_AUTH_FAILED" -> {
+                        uiStatus.value = "❌ Kimlik doğrulama başarısız (başka sunucu deneyin)"
+                        uiConnected.value = false
+                        uiBusy.value = false
+                    }
+                    "LEVEL_VPNPAUSED" -> {
+                        uiStatus.value = "⏸ Duraklatıldı"
+                        uiConnected.value = false
+                    }
+                    "LEVEL_CONNECTING_SERVER_REPLIED",
+                    "LEVEL_CONNECTING_NO_SERVER_REPLY_YET",
+                    "LEVEL_START",
+                    "LEVEL_NONETWORK",
+                    "LEVEL_WAITING_FOR_USER_INPUT" -> {
+                        uiStatus.value = "🟡 Bağlanılıyor…"
+                        uiConnected.value = false
+                        uiBusy.value = true
+                    }
+                    else -> {
+                        if (!message.isNullOrBlank()) uiStatus.value = "${state ?: ""} $message".trim()
+                    }
+                }
             }
         }
     }
@@ -102,11 +134,33 @@ class MainActivity : ComponentActivity() {
 
     // ---- Akış ----
 
-    private fun startConnect() {
+    /** Sunucuları indirir ve her kıtanın en hızlısını seçtirmek için listeler. */
+    private fun loadChoices() {
         if (!isOpenVpnInstalled()) { uiNeedInstall.value = true; return }
         uiNeedInstall.value = false
         uiBusy.value = true
         uiServer.value = null
+        uiChoices.value = emptyList()
+        uiStatus.value = "Sunucular alınıyor…"
+        lifecycleScope.launch {
+            val list = withContext(Dispatchers.IO) { VpnGate.bestPerContinent() }
+            uiBusy.value = false
+            if (list.isEmpty()) { fail("Ücretsiz sunucu bulunamadı. İnternetinizi kontrol edip tekrar deneyin."); return@launch }
+            uiChoices.value = list
+            uiStatus.value = "Bir bölge seçin"
+        }
+    }
+
+    /** Seçilen sunucuya bağlanma akışını başlatır. */
+    private fun chooseServer(server: VpnServer) {
+        pendingServer = server
+        uiChoices.value = emptyList()
+        uiServer.value = buildString {
+            append(server.continent).append(" • ").append(server.country.ifBlank { server.countryShort })
+            if (server.speedMbps > 0) append(" • ~${server.speedMbps} Mbps")
+            append(" • ping ${server.ping} ms")
+        }
+        uiBusy.value = true
         uiStatus.value = "OpenVPN'e bağlanılıyor…"
         pendingConnect = true
         if (service != null) onBound()
@@ -137,17 +191,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun afterVpnPermission() {
+        val srv = pendingServer ?: run { fail("Sunucu seçilmedi."); return }
+        uiStatus.value = "Bağlanılıyor…"
+        pendingConnect = false
         lifecycleScope.launch {
-            uiStatus.value = "En hızlı sunucu aranıyor…"
-            val srv = withContext(Dispatchers.IO) { VpnGate.best() }
-            if (srv == null) { fail("Ücretsiz sunucu bulunamadı. İnternetinizi kontrol edip tekrar deneyin."); return@launch }
-            uiServer.value = buildString {
-                append(srv.country.ifBlank { srv.countryShort })
-                if (srv.speedMbps > 0) append(" • ~${srv.speedMbps} Mbps")
-                append(" • ping ${srv.ping} ms")
-            }
-            uiStatus.value = "Bağlanılıyor…"
-            pendingConnect = false
             try {
                 withContext(Dispatchers.IO) { service?.startVPN(srv.ovpn) }
             } catch (e: Exception) {
@@ -185,16 +232,9 @@ class MainActivity : ComponentActivity() {
         try { startActivity(market) } catch (e: Exception) { startActivity(web) }
     }
 
-    private fun translate(state: String, message: String?): String = when (state) {
-        "CONNECTED" -> "🟢 Bağlı"
-        "DISCONNECTED", "NOPROCESS" -> "⚪ Bağlı değil"
-        "CONNECTING", "WAIT", "RECONNECTING" -> "🟡 Bağlanılıyor…"
-        "AUTH", "GET_CONFIG", "ASSIGN_IP", "ADD_ROUTES" -> "🟡 Kimlik/ayar…"
-        else -> if (message.isNullOrBlank()) state else "$state: $message"
-    }
-
     // ---- Arayüz ----
 
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun Screen() {
         val status by uiStatus
@@ -202,6 +242,7 @@ class MainActivity : ComponentActivity() {
         val busy by uiBusy
         val connected by uiConnected
         val needInstall by uiNeedInstall
+        val choices by uiChoices
 
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
@@ -210,7 +251,7 @@ class MainActivity : ComponentActivity() {
         ) {
             Text("Free VPN", style = MaterialTheme.typography.headlineMedium)
             Text(
-                "Tek dokunuşla en hızlı ücretsiz sunucuya bağlanır (VPN Gate).",
+                "Her bölgenin en hızlı ücretsiz sunucusunu bulur, seçtiğinize bağlanır (VPN Gate).",
                 style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center,
             )
@@ -246,13 +287,49 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            Button(
-                onClick = { if (connected) disconnect() else startConnect() },
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth().height(56.dp),
-            ) {
-                if (busy) CircularProgressIndicator(Modifier.height(22.dp), strokeWidth = 2.dp, color = Color.White)
-                else Text(if (connected) "Bağlantıyı kes" else "En hızlı sunucuya bağlan", style = MaterialTheme.typography.titleMedium)
+            // Kıta seçim listesi
+            if (choices.isNotEmpty() && !connected) {
+                Text("Her bölgenin en hızlı sunucusu", style = MaterialTheme.typography.titleSmall)
+                choices.forEach { srv ->
+                    ElevatedCard(
+                        onClick = { chooseServer(srv) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            Modifier.padding(16.dp).fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column {
+                                Text(srv.continent, style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    srv.country.ifBlank { srv.countryShort },
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.End) {
+                                if (srv.speedMbps > 0) Text("~${srv.speedMbps} Mbps", style = MaterialTheme.typography.titleSmall)
+                                Text("ping ${srv.ping} ms", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+                OutlinedButton(
+                    onClick = { uiChoices.value = emptyList(); uiStatus.value = "Hazır" },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("İptal") }
+            } else {
+                Button(
+                    onClick = { if (connected) disconnect() else loadChoices() },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth().height(56.dp),
+                ) {
+                    if (busy) CircularProgressIndicator(Modifier.height(22.dp), strokeWidth = 2.dp, color = Color.White)
+                    else Text(
+                        if (connected) "Bağlantıyı kes" else "Sunucuları bul ve seç",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
             }
 
             HorizontalDivider()

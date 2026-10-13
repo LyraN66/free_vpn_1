@@ -12,6 +12,7 @@ data class VpnServer(
     val speedBps: Long,
     val ping: String,
     val ovpn: String,
+    val continent: String = "",
 ) {
     val speedMbps: Int get() = (speedBps / 1_000_000L).toInt()
 }
@@ -53,6 +54,40 @@ object VpnGate {
 
     /** En hızlı sunucu. */
     fun best(): VpnServer? = fetchServers().firstOrNull()
+
+    /** Her kıta için en hızlı sunucu, hızdan yavaşa sıralı. */
+    fun bestPerContinent(servers: List<VpnServer> = fetchServers()): List<VpnServer> {
+        return servers
+            .groupBy { continentOf(it.countryShort) }
+            .mapNotNull { (continent, list) ->
+                list.maxByOrNull { it.speedBps }?.copy(continent = continent)
+            }
+            .sortedByDescending { it.speedBps }
+    }
+
+    /** ISO ülke kodundan kıta adı (Türkçe). */
+    fun continentOf(cc: String): String = when (cc.uppercase()) {
+        // Avrupa
+        "AL","AD","AT","BY","BE","BA","BG","HR","CY","CZ","DK","EE","FI","FR","DE","GR","HU",
+        "IS","IE","IT","LV","LI","LT","LU","MT","MD","MC","ME","NL","MK","NO","PL","PT","RO",
+        "RU","SM","RS","SK","SI","ES","SE","CH","UA","GB","VA","XK" -> "Avrupa"
+        // Asya
+        "AF","AM","AZ","BH","BD","BT","BN","KH","CN","GE","HK","IN","ID","IR","IQ","IL","JP",
+        "JO","KZ","KW","KG","LA","LB","MO","MY","MV","MN","MM","NP","KP","OM","PK","PS","PH",
+        "QA","SA","SG","KR","LK","SY","TW","TJ","TH","TL","TR","TM","AE","UZ","VN","YE" -> "Asya"
+        // Kuzey Amerika
+        "CA","US","MX","GT","BZ","SV","HN","NI","CR","PA","CU","DO","HT","JM","BS","BB","TT" -> "Kuzey Amerika"
+        // Güney Amerika
+        "AR","BO","BR","CL","CO","EC","GY","PY","PE","SR","UY","VE" -> "Güney Amerika"
+        // Afrika
+        "DZ","AO","BJ","BW","BF","BI","CM","CV","CF","TD","KM","CG","CD","CI","DJ","EG","GQ",
+        "ER","ET","GA","GM","GH","GN","GW","KE","LS","LR","LY","MG","MW","ML","MR","MU","MA",
+        "MZ","NA","NE","NG","RW","SN","SC","SL","SO","ZA","SS","SD","SZ","TZ","TG","TN","UG",
+        "ZM","ZW" -> "Afrika"
+        // Okyanusya
+        "AU","NZ","FJ","PG","WS","TO","VU","SB","NC" -> "Okyanusya"
+        else -> "Diğer"
+    }
 
     private fun download(urlStr: String): String? {
         return try {
